@@ -1,7 +1,7 @@
 """CCTV Archive Manager Lite GUI.
 
 Features: local SQLite catalogue, SMB scan, incremental sync, merge plan,
-and execution of one selected merge group with mkvmerge progress.
+single-group merging and sequential batch merging with mkvmerge progress.
 Does not modify source MKVs.
 """
 
@@ -24,6 +24,7 @@ from .filename_parser import parse_recording_filename
 from .incremental_sync import sync_new_recordings
 from .merge_planner import plan_merge_groups
 from .progress_merger import merge_with_progress
+from .batch_merger import GroupMergeError, merge_groups
 
 DEFAULT_SOURCE = r"\\nvr\NVR_Record\Door\video\WSGXN"
 DEFAULT_DATABASE = r"C:\CCTV-Archive-Manager\data\catalog.sqlite3"
@@ -148,6 +149,31 @@ class MergeWorker(BaseWorker):
             self.error_occurred.emit(str(exc))
 
 
+class BatchMergeWorker(BaseWorker):
+    """Run all planned groups sequentially, leaving the GUI responsive."""
+
+    group_progress_changed = Signal(int, int, int)
+    batch_failed = Signal(object)
+
+    def __init__(self, groups, output_dir, parent=None):
+        super().__init__(parent)
+        # Snapshot the immutable plan before the background task begins.
+        self.groups = tuple(groups)
+        self.output_dir = Path(output_dir)
+
+    def run(self):
+        started = time.perf_counter()
+        try:
+            result = merge_groups(
+                self.groups,
+                self.output_dir,
+                on_progress=self.group_progress_changed.emit,
+            )
+            self.result_ready.emit((result, time.perf_counter() - started))
+        except Exception as exc:
+            self.batch_failed.emit((exc, time.perf_counter() - started))
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -168,7 +194,7 @@ class MainWindow(QMainWindow):
         title = QLabel("CCTV Archive Manager Lite")
         title.setStyleSheet("font-size: 22px; font-weight: bold;")
         layout.addWidget(title)
-        layout.addWidget(QLabel("MKV 검색 · SQLite 캐시 · 증분 동기화 · 병합 계획 · 단일 그룹 병합"))
+        layout.addWidget(QLabel("MKV 검색 · SQLite 캐시 · 증분 동기화 · 병합 계획 · 단일·전체 그룹 병합"))
 
         layout.addWidget(QLabel("원본 MKV 폴더"))
         source_row = QHBoxLayout()
@@ -216,7 +242,7 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.table, 3)
 
-        group_box = QGroupBox("병합 계획 및 단일 그룹 실행")
+        group_box = QGroupBox("병합 계획 및 실행")
         group_layout = QVBoxLayout(group_box)
         self.selected_date_label = QLabel("선택한 날짜: 없음")
         group_layout.addWidget(self.selected_date_label)
@@ -261,7 +287,19 @@ class MainWindow(QMainWindow):
         self.merge_button.setMinimumHeight(38)
         self.merge_button.setEnabled(False)
         self.merge_button.clicked.connect(self.start_merge)
+        self.merge_all_button = QPushButton("전체 그룹 순차 병합 실행")
+        self.merge_all_button.setMinimumHeight(38)
+        self.merge_all_button.setEnabled(False)
+        self.merge_all_button.clicked.connect(self.start_batch_merge)
         group_layout.addWidget(self.merge_button)
+        group_layout.addWidget(self.merge_all_button)
+
+        self.batch_progress_label = QLabel("전체 그룹 진행률: 대기 중")
+        group_layout.addWidget(self.batch_progress_label)
+        self.batch_progress_bar = QProgressBar()
+        self.batch_progress_bar.setRange(0, 100)
+        self.batch_progress_bar.setValue(0)
+        group_layout.addWidget(self.batch_progress_bar)
 
         self.progress_label = QLabel("병합 진행률: 대기 중")
         group_layout.addWidget(self.progress_label)
@@ -292,6 +330,7 @@ class MainWindow(QMainWindow):
         self.current_groups = []
         self.plan_table.setRowCount(0)
         self.merge_button.setEnabled(False)
+        self.merge_all_button.setEnabled(False)
 
     def clear_results(self, *_args):
         self.view_mode = None
@@ -350,6 +389,9 @@ class MainWindow(QMainWindow):
             and bool(self.plan_table.selectedItems())
         )
         self.merge_button.setEnabled(valid)
+        self.merge_all_button.setEnabled(
+            self.worker is None and bool(self.current_groups)
+        )
 
     def start_worker(self, worker):
         if self.worker is not None:
@@ -535,8 +577,9 @@ class MainWindow(QMainWindow):
             f"병합 계획 완료: {len(groups)}개 | 소요시간: {elapsed:.4f}초"
         )
         self.statusBar().showMessage(
-            "미리보기 생성 완료. 실행하려면 아래에서 그룹 1개를 선택하세요."
+            "한 그룹은 행을 선택하여 실행하고, 전체 그룹은 순차 병합 버튼으로 실행합니다."
         )
+        self.update_merge_button()
 
     def start_merge(self):
         if self.worker is not None:
@@ -612,6 +655,134 @@ class MainWindow(QMainWindow):
             f"소요시간: {elapsed:.2f}초\n\n"
             "출력 영상은 별도 플레이어에서 재생 검증해 주세요.",
         )
+
+    def start_batch_merge(self):
+        """Run all groups in the current preview, sequentially."""
+        if self.worker is not None or not self.current_groups:
+            return
+
+        groups = tuple(self.current_groups)
+        output_dir = Path(self.output_edit.text().strip())
+        if not output_dir.is_dir():
+            QMessageBox.warning(self, "출력 폴더 오류", f"출력 폴더가 없습니다:\n{output_dir}")
+            return
+
+        # Local output-only checks, avoiding slow SMB metadata on GUI thread.
+        for group in groups:
+            destination = output_dir / group.output_name
+            partial = destination.with_name(destination.stem + ".partial.mkv")
+            lock = destination.with_name(destination.name + ".lock")
+            for path in (destination, partial, lock):
+                if path.exists():
+                    QMessageBox.warning(
+                        self, "병합 실행 불가",
+                        f"기존 출력·임시·잠금 파일이 있습니다:\n{path}\n\n"
+                        "이번 실행에서는 기존 파일을 덮어쓰지 않습니다.",
+                    )
+                    return
+
+        total_inputs = sum(len(group.files) for group in groups)
+        summary = "\n".join(
+            f"{index}. {group.output_name} ({len(group.files)}개)"
+            for index, group in enumerate(groups, 1)
+        )
+        answer = QMessageBox.question(
+            self, "전체 그룹 순차 병합 확인",
+            f"출력 파일: {len(groups)}개\n"
+            f"입력 MKV: 총 {total_inputs}개\n"
+            f"출력 폴더: {output_dir}\n\n"
+            f"{summary}\n\n"
+            "각 그룹을 순서대로 병합하고 오류가 발생하면 즉시 중단합니다.\n"
+            "현재 작업 취소 기능은 없습니다. 계속하시겠습니까?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        self.progress_bar.setValue(0)
+        self.progress_label.setText("현재 그룹 진행률: 0% (시작 중)")
+        self.batch_progress_bar.setValue(0)
+        self.batch_progress_label.setText(
+            f"전체 그룹 진행률: 0% (0/{len(groups)}개 완료)"
+        )
+        self.status_label.setText(f"전체 {len(groups)}개 그룹 순차 병합 시작")
+        self.statusBar().showMessage(
+            "실행 전 전체 원본을 검증합니다. 이 단계는 SMB에서 시간이 걸릴 수 있습니다."
+        )
+
+        worker = BatchMergeWorker(groups, output_dir, self)
+        worker.group_progress_changed.connect(self.show_batch_progress)
+        worker.result_ready.connect(self.show_batch_result)
+        worker.batch_failed.connect(self.show_batch_error)
+        self.start_worker(worker)
+
+    def show_batch_progress(self, index, total, percent):
+        # MKVToolNix progress=100 means a group is near completion, not that
+        # the output was already renamed/validated. Avoid claiming completion.
+        self.progress_bar.setValue(percent)
+        self.progress_label.setText(
+            f"현재 그룹 진행률: {index}/{total} · {percent}%"
+        )
+        overall = round(((index - 1) + percent / 100) / total * 100)
+        self.batch_progress_bar.setValue(overall)
+        self.batch_progress_label.setText(
+            f"전체 그룹 진행률: 약 {overall}% "
+            f"({index}/{total}번째 처리 중)"
+        )
+        self.status_label.setText(f"MKV 그룹 {index}/{total} 병합 중")
+
+    def show_batch_result(self, payload):
+        result, elapsed = payload
+        self.progress_bar.setValue(100)
+        self.progress_label.setText("현재 그룹 진행률: 100% (완료)")
+        self.batch_progress_bar.setValue(100)
+        self.batch_progress_label.setText(
+            f"전체 그룹 진행률: 100% ({len(result.completed)}/{result.total_groups}개 완료)"
+        )
+        self.status_label.setText(
+            f"전체 그룹 병합 성공: {len(result.completed)}개 | {elapsed:.2f}초"
+        )
+        completed_paths = "\n".join(str(item.output) for item in result.completed)
+        self.statusBar().showMessage("전체 그룹 병합 성공. 결과 파일을 재생 검증하세요.")
+        self.clear_plan()  # Prevent reuse of a plan containing completed outputs.
+        QMessageBox.information(
+            self, "전체 MKV 병합 완료",
+            f"{len(result.completed)}개 그룹을 모두 병합했습니다.\n"
+            f"실행시간: {elapsed:.2f}초\n\n"
+            f"완료 파일:\n{completed_paths}\n\n"
+            "영상 연결부는 플레이어로 별도 확인해 주세요.",
+        )
+
+    def show_batch_error(self, payload):
+        exc, elapsed = payload
+        if isinstance(exc, GroupMergeError):
+            completed_count = len(exc.completed)
+            total = exc.total_groups
+            completed_paths = "\n".join(str(item.output) for item in exc.completed)
+            description = (
+                f"실패 그룹: {exc.failed_group}/{total}\n"
+                f"완료 그룹: {completed_count}/{total}\n"
+                f"처리시간: {elapsed:.2f}초\n\n"
+                f"오류 내용: {exc}\n\n"
+                f"완료된 파일(보존됨):\n{completed_paths or '없음'}"
+            )
+            self.batch_progress_label.setText(
+                f"전체 그룹 병합 중단: {completed_count}/{total}개 완료"
+            )
+        else:
+            # Errors in the all-groups preflight happen before any merge starts.
+            description = f"사전 검증 또는 실행 오류:\n{exc}"
+            self.batch_progress_label.setText("전체 그룹 병합 실패: 사전 검증/실행 오류")
+        self.progress_label.setText(
+            f"현재 그룹 중단 (마지막 표시: {self.progress_bar.value()}%)"
+        )
+        self.status_label.setText("전체 그룹 병합 중단")
+        self.statusBar().showMessage(
+            "완료된 출력 파일은 보존합니다. 재시도 전에 출력·잠금·임시 파일을 확인하세요."
+        )
+        self.clear_plan()
+        QMessageBox.critical(self, "전체 MKV 병합 실패", description)
 
     def show_error(self, message):
         if isinstance(self.worker, MergeWorker):
