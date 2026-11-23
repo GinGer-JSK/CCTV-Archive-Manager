@@ -1,7 +1,8 @@
 """CCTV Archive Manager Lite GUI.
 
 Features: local SQLite catalogue, SMB scan, incremental sync, merge plan,
-and execution of one selected merge group. Does not modify source MKVs.
+and execution of one selected merge group with mkvmerge progress.
+Does not modify source MKVs.
 """
 
 import os
@@ -13,7 +14,7 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QGroupBox, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
-    QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QProgressBar, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from . import __version__
@@ -22,7 +23,7 @@ from .file_scanner import scan_recordings
 from .filename_parser import parse_recording_filename
 from .incremental_sync import sync_new_recordings
 from .merge_planner import plan_merge_groups
-from .merger import merge_recordings
+from .progress_merger import merge_with_progress
 
 DEFAULT_SOURCE = r"\\nvr\NVR_Record\Door\video\WSGXN"
 DEFAULT_DATABASE = r"C:\CCTV-Archive-Manager\data\catalog.sqlite3"
@@ -126,7 +127,9 @@ class PlanWorker(BaseWorker):
 
 
 class MergeWorker(BaseWorker):
-    """Execute one merge in the background using the established safe engine."""
+    """Execute one merge and forward mkvmerge progress to the GUI."""
+
+    progress_changed = Signal(int)
 
     def __init__(self, files, output, parent=None):
         super().__init__(parent)
@@ -136,7 +139,10 @@ class MergeWorker(BaseWorker):
     def run(self):
         try:
             started = time.perf_counter()
-            result = merge_recordings(self.files, self.output)
+            result = merge_with_progress(
+                self.files, self.output,
+                on_progress=self.progress_changed.emit,
+            )
             self.result_ready.emit((result, time.perf_counter() - started))
         except Exception as exc:
             self.error_occurred.emit(str(exc))
@@ -256,6 +262,14 @@ class MainWindow(QMainWindow):
         self.merge_button.setEnabled(False)
         self.merge_button.clicked.connect(self.start_merge)
         group_layout.addWidget(self.merge_button)
+
+        self.progress_label = QLabel("병합 진행률: 대기 중")
+        group_layout.addWidget(self.progress_label)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("%p%")
+        group_layout.addWidget(self.progress_bar)
         layout.addWidget(group_box, 2)
 
         self.status_label = QLabel("준비 완료")
@@ -563,16 +577,25 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
 
+        self.progress_bar.setValue(0)
+        self.progress_label.setText("병합 진행률: 0% (시작 중)")
         self.status_label.setText(f"실제 병합 실행 중: {group.output_name}")
         self.statusBar().showMessage(
-            "mkvmerge 실행 중입니다. 아직 진행률 및 취소 기능은 없습니다."
+            "mkvmerge 진행률을 수집 중입니다. 작업 취소 기능은 아직 없습니다."
         )
         worker = MergeWorker(inputs, destination, self)
+        worker.progress_changed.connect(self.show_merge_progress)
         worker.result_ready.connect(self.show_merge_result)
         self.start_worker(worker)
 
+    def show_merge_progress(self, percent):
+        self.progress_bar.setValue(percent)
+        self.progress_label.setText(f"병합 진행률: {percent}%")
+
     def show_merge_result(self, payload):
         result, elapsed = payload
+        self.progress_bar.setValue(100)
+        self.progress_label.setText("병합 진행률: 100% (완료)")
         self.status_label.setText(
             f"병합 성공: {result.output.name} | "
             f"{result.output_bytes:,} bytes | {elapsed:.2f}초"
@@ -591,6 +614,10 @@ class MainWindow(QMainWindow):
         )
 
     def show_error(self, message):
+        if isinstance(self.worker, MergeWorker):
+            self.progress_label.setText(
+                f"병합 실패 (최종 표시 진행률: {self.progress_bar.value()}%)"
+            )
         self.status_label.setText("작업 실패")
         QMessageBox.critical(self, "작업 오류", message)
 
