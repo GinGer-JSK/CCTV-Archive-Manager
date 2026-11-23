@@ -2,6 +2,9 @@
 """CCTV Archive Manager Lite - Windows GUI."""
 
 import sys
+import os
+import time
+
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
@@ -68,6 +71,8 @@ class PlanWorker(QThread):
         self.output = Path(output)
 
     def run(self):
+        start = time.perf_counter()
+
         try:
             if not self.output.is_dir():
                 raise NotADirectoryError(
@@ -84,21 +89,21 @@ class PlanWorker(QThread):
 
             files = []
 
-            for entry in self.source.iterdir():
-                if not entry.is_file():
-                    continue
+            # 메타데이터 조회 없이 파일명과 경로만 조사
+            with os.scandir(self.source) as entries:
+                for entry in entries:
+                    if not entry.name.lower().endswith(".mkv"):
+                        continue
 
-                if entry.suffix.lower() != ".mkv":
-                    continue
+                    info = parse_recording_filename(entry.name)
 
-                info = parse_recording_filename(entry.name)
+                    if info is None or info.date != self.date:
+                        continue
 
-                if info is not None and info.date == self.date:
-                    files.append(entry)
+                    files.append(Path(entry.path))
 
             groups = plan_merge_groups(files, self.parts)
 
-            # 기존 병합 결과를 덮어쓰지 않도록 사전 확인
             for group in groups:
                 destination = self.output / group.output_name
 
@@ -116,10 +121,13 @@ class PlanWorker(QThread):
                         f"미완료 병합 파일이 존재합니다:\n{partial}"
                     )
 
-            self.result_ready.emit(groups)
+            elapsed = time.perf_counter() - start
+
+            self.result_ready.emit((groups, elapsed))
 
         except Exception as error:
             self.error_occurred.emit(str(error))
+
 
 
 class MainWindow(QMainWindow):
@@ -499,7 +507,8 @@ class MainWindow(QMainWindow):
 
         self.start_worker(worker)
 
-    def show_plan(self, groups):
+    def show_plan(self, result):
+        groups, elapsed = result
         self.current_groups = groups
         self.plan_table.setRowCount(len(groups))
 
@@ -525,7 +534,8 @@ class MainWindow(QMainWindow):
                 self.plan_table.setItem(row, col, item)
 
         self.status_label.setText(
-            f"병합 계획 완료: {len(groups)}개 출력 파일"
+            f"병합 계획 완료: {len(groups)}개 출력 파일 "
+            f"| 소요시간: {elapsed:.3f}초"
         )
 
         self.statusBar().showMessage(
