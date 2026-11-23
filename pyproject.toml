@@ -1,0 +1,19 @@
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cctv-archive-manager"
+version = "0.1.0a0"
+description = "CCTV MKV recording archive and merge manager"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary - license pending" }
+dependencies = []
+
+[project.scripts]
+cctv-archive = "cctv_archive_manager.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
