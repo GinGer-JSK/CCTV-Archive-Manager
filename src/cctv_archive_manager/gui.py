@@ -13,7 +13,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QGroupBox, QHBoxLayout, QHeaderView,
+    QApplication, QComboBox, QFileDialog, QGroupBox, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
     QProgressBar, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
@@ -24,12 +24,21 @@ from .file_scanner import scan_recordings
 from .filename_parser import parse_recording_filename
 from .incremental_sync import sync_new_recordings
 from .merge_planner import plan_merge_groups
+from .duration_workflow import prepare_duration_batch
 from .progress_merger import MergeCancelled, merge_with_progress
 from .batch_merger import BatchMergeCancelled, GroupMergeError, merge_groups
 
 DEFAULT_SOURCE = r"\\nvr\NVR_Record\Door\video\WSGXN"
 DEFAULT_DATABASE = r"C:\CCTV-Archive-Manager\data\catalog.sqlite3"
 DEFAULT_OUTPUT = r"C:\CCTV-Archive-Manager\data\merge-output"
+
+
+def format_duration_ms(value: int) -> str:
+    """Display a cached approximate playback duration without modifying video."""
+    seconds = max(0, round(value / 1000))
+    hours, remain = divmod(seconds, 3600)
+    minutes, seconds = divmod(remain, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
 class BaseWorker(QThread):
@@ -84,7 +93,7 @@ class SyncWorker(BaseWorker):
 
 
 class PlanWorker(BaseWorker):
-    def __init__(self, source, database, date, parts, output, use_cache, parent=None):
+    def __init__(self, source, database, date, parts, output, use_cache, mode="count", parent=None):
         super().__init__(parent)
         self.source = Path(source)
         self.database = Path(database)
@@ -92,6 +101,7 @@ class PlanWorker(BaseWorker):
         self.parts = parts
         self.output = Path(output)
         self.use_cache = use_cache
+        self.mode = mode
 
     def run(self):
         try:
@@ -101,28 +111,44 @@ class PlanWorker(BaseWorker):
             if self.output.resolve().is_relative_to(self.source.resolve()):
                 raise ValueError("출력 폴더는 원본 폴더 밖에 있어야 합니다.")
 
-            if self.use_cache:
-                files = get_cached_files(self.database, self.source, self.date)
+            if self.mode == "duration":
+                if not self.use_cache:
+                    raise ValueError("B 방식은 SQLite 캐시 목록에서만 사용할 수 있습니다. 먼저 SQLite 캐시를 불러오세요.")
+                # This may update duration columns in the *selected* local DB.
+                # Never migrate a catalog automatically when its source key differs.
+                indexed = get_cached_files(self.database, self.source, self.date)
+                if not indexed:
+                    raise ValueError(
+                        "선택한 SQLite DB의 원본 경로가 현재 NVR 경로와 일치하지 않습니다. "
+                        "IP 경로로 매핑한 테스트 DB를 선택하고 캐시 목록을 다시 불러오세요."
+                    )
+                batch = prepare_duration_batch(self.database, self.source, self.date, self.parts)
+                groups = list(batch.groups)
+            elif self.mode == "count":
+                if self.use_cache:
+                    files = get_cached_files(self.database, self.source, self.date)
+                else:
+                    files = []
+                    with os.scandir(self.source) as entries:
+                        for entry in entries:
+                            if not entry.name.lower().endswith(".mkv"):
+                                continue
+                            info = parse_recording_filename(entry.name)
+                            if info is not None and info.date == self.date:
+                                files.append(Path(entry.path))
+                groups = plan_merge_groups(files, self.parts)
             else:
-                files = []
-                with os.scandir(self.source) as entries:
-                    for entry in entries:
-                        if not entry.name.lower().endswith(".mkv"):
-                            continue
-                        info = parse_recording_filename(entry.name)
-                        if info is not None and info.date == self.date:
-                            files.append(Path(entry.path))
+                raise ValueError(f"지원하지 않는 분할 방식: {self.mode}")
 
-            groups = plan_merge_groups(files, self.parts)
             for group in groups:
                 destination = self.output / group.output_name
-                partial = destination.with_name(
-                    destination.stem + ".partial.mkv"
-                )
-                if destination.exists() or partial.exists():
-                    raise FileExistsError(
-                        f"병합 결과물 또는 임시 파일이 이미 존재합니다: {destination}"
-                    )
+                partial = destination.with_name(destination.stem + ".partial.mkv")
+                lock = destination.with_name(destination.name + ".lock")
+                for existing in (destination, partial, lock):
+                    if existing.exists():
+                        raise FileExistsError(
+                            f"병합 결과물·임시 파일·잠금 파일이 이미 존재합니다: {existing}"
+                        )
             self.result_ready.emit((groups, time.perf_counter() - started))
         except Exception as exc:
             self.error_occurred.emit(str(exc))
@@ -282,15 +308,24 @@ class MainWindow(QMainWindow):
         parts_row.addStretch()
         group_layout.addLayout(parts_row)
 
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("분할 방식"))
+        self.split_mode = QComboBox()
+        self.split_mode.addItem("A · 파일 개수 균등 (기존)", "count")
+        self.split_mode.addItem("B · 실제 재생시간 균등 (SQLite)", "duration")
+        self.split_mode.setToolTip("B 방식은 선택한 SQLite DB에 MKV 재생시간을 저장할 수 있습니다.")
+        mode_row.addWidget(self.split_mode, 1)
+        group_layout.addLayout(mode_row)
+
         self.plan_button = QPushButton("선택한 날짜의 병합 계획 생성")
         self.plan_button.setMinimumHeight(36)
         self.plan_button.clicked.connect(self.start_plan)
         group_layout.addWidget(self.plan_button)
 
         self.plan_table = QTableWidget()
-        self.plan_table.setColumnCount(4)
+        self.plan_table.setColumnCount(5)
         self.plan_table.setHorizontalHeaderLabels(
-            ["출력 파일명", "입력 개수", "첫 번째 원본", "마지막 원본"]
+            ["출력 파일명", "입력 개수", "예상 재생시간", "첫 번째 원본", "마지막 원본"]
         )
         self.plan_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.plan_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -343,6 +378,7 @@ class MainWindow(QMainWindow):
         self.database_edit.textChanged.connect(self.clear_results)
         self.output_edit.textChanged.connect(self.clear_plan)
         self.parts_spin.valueChanged.connect(self.clear_plan)
+        self.split_mode.currentIndexChanged.connect(self.clear_plan)
 
     def selected_date(self):
         row = self.table.currentRow()
@@ -397,7 +433,7 @@ class MainWindow(QMainWindow):
             self.source_edit, self.source_button, self.database_edit,
             self.database_button, self.cache_button, self.sync_button,
             self.scan_button, self.output_edit, self.output_button,
-            self.parts_spin, self.plan_button, self.table, self.plan_table,
+            self.parts_spin, self.split_mode, self.plan_button, self.table, self.plan_table,
         )
         for widget in widgets:
             widget.setEnabled(not busy)
@@ -629,6 +665,7 @@ class MainWindow(QMainWindow):
             parts=self.parts_spin.value(),
             output=self.output_edit.text().strip(),
             use_cache=self.view_mode == "cache",
+            mode=self.split_mode.currentData(),
             parent=self,
         )
         worker.result_ready.connect(self.show_plan)
@@ -641,6 +678,8 @@ class MainWindow(QMainWindow):
         for row, group in enumerate(groups):
             values = [
                 group.output_name, len(group.files),
+                format_duration_ms(group.total_duration_ms)
+                if hasattr(group, "total_duration_ms") else "—",
                 group.files[0].name, group.files[-1].name,
             ]
             for col, value in enumerate(values):
@@ -651,7 +690,8 @@ class MainWindow(QMainWindow):
                     item.setText(str(value))
                 self.plan_table.setItem(row, col, item)
         self.status_label.setText(
-            f"병합 계획 완료: {len(groups)}개 | 소요시간: {elapsed:.4f}초"
+            f"병합 계획 완료 ({self.split_mode.currentText()}): "
+            f"{len(groups)}개 | 소요시간: {elapsed:.4f}초"
         )
         self.statusBar().showMessage(
             "한 그룹은 행을 선택하여 실행하고, 전체 그룹은 순차 병합 버튼으로 실행합니다."
@@ -761,7 +801,9 @@ class MainWindow(QMainWindow):
 
         total_inputs = sum(len(group.files) for group in groups)
         summary = "\n".join(
-            f"{index}. {group.output_name} ({len(group.files)}개)"
+            f"{index}. {group.output_name} ({len(group.files)}개"
+            + (f", {format_duration_ms(group.total_duration_ms)}" if hasattr(group, "total_duration_ms") else "")
+            + ")"
             for index, group in enumerate(groups, 1)
         )
         answer = QMessageBox.question(
