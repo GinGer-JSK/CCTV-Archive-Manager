@@ -10,11 +10,13 @@ from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
     QMessageBox, QPushButton, QProgressBar, QTableWidget, QTableWidgetItem,
-    QVBoxLayout,
+    QVBoxLayout, QPlainTextEdit, QInputDialog,
 )
 
 from .catalog_reader import get_catalog_snapshot
 from .daily_resume import plan_cached_days, run_daily_resume
+from .recovery_diagnosis import inspect_daily_output, format_diagnosis
+from .recovery_engine import preflight as recovery_preflight, quarantine as recovery_quarantine
 from .output_integrity import inspect_mkv_output
 
 MAX_DAYS = 7  # Separate deliberate runs for larger archives.
@@ -92,6 +94,52 @@ class DailyExecuteWorker(QThread):
             self.failed.emit(str(exc))
 
 
+class DailyRecoveryInspectWorker(QThread):
+    ready = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, output: str, expected: tuple[str, ...]):
+        super().__init__()
+        self.output, self.expected = output, expected
+
+    def run(self):
+        try:
+            report = inspect_daily_output(self.output, self.expected)
+            self.ready.emit(format_diagnosis(report))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class DailyRecoveryPreflightWorker(QThread):
+    ready = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, groups, output):
+        super().__init__()
+        self.groups, self.output = tuple(groups), output
+
+    def run(self):
+        try:
+            self.ready.emit(recovery_preflight(self.groups, self.output))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class DailyRecoveryApplyWorker(QThread):
+    ready = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, plan, groups):
+        super().__init__()
+        self.plan, self.groups = plan, tuple(groups)
+
+    def run(self):
+        try:
+            self.ready.emit(str(recovery_quarantine(self.plan, self.groups)))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class DailyBatchDialog(QDialog):
     """Explicit 2-step preview/execute dialog for user-selected short date ranges."""
 
@@ -102,6 +150,7 @@ class DailyBatchDialog(QDialog):
         self.resize(1000, 630)
         self.groups = ()
         self.worker = None
+        self.recovery_plan = None
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
             'SQLite에 등록된 날짜만 계획합니다. 미리보기만으로 병합은 시작되지 않습니다.\n'
@@ -132,12 +181,22 @@ class DailyBatchDialog(QDialog):
         self.preview_button = QPushButton('날짜 범위 병합 계획 미리보기')
         self.execute_button = QPushButton('미완료 그룹 병합 실행 / 중단 후 재개')
         self.execute_button.setEnabled(False)
+        self.recovery_button = QPushButton('출력 폴더 중단 상태 진단 (읽기 전용)')
+        self.recovery_preflight_button = QPushButton('중단 작업 복구 준비 검사 (미리보기 계획 필요)')
+        self.recovery_apply_button = QPushButton('승인 후 미완료 파일 증거 보존')
+        self.recovery_preflight_button.setEnabled(False)
+        self.recovery_apply_button.setEnabled(False)
         self.cancel_button = QPushButton('진행 중인 병합 취소')
         self.cancel_button.setEnabled(False)
         btns = QHBoxLayout()
         for btn in (self.preview_button, self.execute_button, self.cancel_button):
             btns.addWidget(btn)
         layout.addLayout(btns)
+        layout.addWidget(self.recovery_button)
+        recovery_row = QHBoxLayout()
+        recovery_row.addWidget(self.recovery_preflight_button)
+        recovery_row.addWidget(self.recovery_apply_button)
+        layout.addLayout(recovery_row)
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(('날짜', '출력 파일명', '입력 파일 수', '예상 재생시간'))
         layout.addWidget(self.table)
@@ -148,12 +207,18 @@ class DailyBatchDialog(QDialog):
         self.preview_button.clicked.connect(self.start_preview)
         self.execute_button.clicked.connect(self.start_execution)
         self.cancel_button.clicked.connect(self.request_cancel)
+        self.recovery_button.clicked.connect(self.start_recovery_inspection)
+        self.recovery_preflight_button.clicked.connect(self.start_recovery_preflight)
+        self.recovery_apply_button.clicked.connect(self.start_recovery_apply)
         for edit in (self.source_edit, self.database_edit, self.output_edit,
                      self.start_edit, self.end_edit, self.parts_edit):
             edit.textChanged.connect(self.invalidate_plan)
         self.mode_combo.currentIndexChanged.connect(self.invalidate_plan)
 
     def invalidate_plan(self, *_args):
+        self.recovery_plan = None
+        self.recovery_preflight_button.setEnabled(False)
+        self.recovery_apply_button.setEnabled(False)
         self.groups = ()
         self.table.setRowCount(0)
         self.execute_button.setEnabled(False)
@@ -161,9 +226,12 @@ class DailyBatchDialog(QDialog):
     def set_busy(self, busy: bool):
         for item in (self.source_edit, self.database_edit, self.output_edit,
                      self.start_edit, self.end_edit, self.parts_edit, self.mode_combo,
-                     self.preview_button):
+                     self.preview_button, self.recovery_button,
+                     self.recovery_preflight_button, self.recovery_apply_button):
             item.setEnabled(not busy)
         self.execute_button.setEnabled(not busy and bool(self.groups))
+        self.recovery_preflight_button.setEnabled(not busy and bool(self.groups))
+        self.recovery_apply_button.setEnabled(not busy and self.recovery_plan is not None)
         self.cancel_button.setEnabled(
             busy and isinstance(self.worker, DailyExecuteWorker)
             and not self.worker.cancel_event.is_set()
@@ -183,6 +251,94 @@ class DailyBatchDialog(QDialog):
             self.worker.deleteLater()
         self.worker = None
         self.set_busy(False)
+
+    def start_recovery_preflight(self):
+        if self.worker is not None or not self.groups:
+            return
+        self.recovery_plan = None
+        self.recovery_apply_button.setEnabled(False)
+        self.status.setText('복구 준비 검사 중: 원본·체크포인트·잠금 소유자 검증...')
+        worker = DailyRecoveryPreflightWorker(self.groups, self.output_edit.text().strip())
+        worker.ready.connect(self.show_recovery_plan)
+        self.start_worker(worker)
+
+    def show_recovery_plan(self, plan):
+        self.recovery_plan = plan
+        items = '\n'.join(f'  - {p.name} ({p.stat().st_size:,} bytes)' for p in plan.archives)
+        QMessageBox.information(
+            self, '복구 준비 검사 완료 — 아직 파일 이동 없음',
+            f'병합 계획 서명과 원본이 일치합니다. 완료 그룹 {len(plan.completed)}개는 '
+            f'유지합니다.\n\n출력 폴더: {plan.output}\n\n'
+            f'보존 대상 ({len(plan.archives)}개):\n{items}\n\n'
+            '실행 중인 잠금 소유자가 프로세스 목록에서 발견되지 않았습니다. '
+            '이것만으로 안전을 보장하지는 않으므로 실제 실행 때 다시 검사합니다.\n'
+            '증거 파일은 출력 폴더 밖의 별도 하위 경로에 보관합니다.'
+        )
+        self.status.setText('복구 사전 점검 통과. 실행은 별도 승인 필요.')
+
+    def start_recovery_apply(self):
+        if self.worker is not None or self.recovery_plan is None or not self.groups:
+            return
+        plan = self.recovery_plan
+        phrase = 'ARCHIVE INCOMPLETE ARTIFACTS'
+        entered, ok = QInputDialog.getText(
+            self, '복구 승인 문구 확인',
+            f'원본 및 완료 MKV는 그대로 둡니다.\n증거 보존만 실행합니다.\n'
+            f'승인하려면 다음 문구를 정확히 입력하세요:\n{phrase}'
+        )
+        if not ok or entered != phrase:
+            return
+        decision = QMessageBox.warning(
+            self, '마지막 확인 — 증거 파일 이동',
+            f'출력 폴더: {plan.output}\n'
+            f'미완료 파일 및 잠금 {len(plan.archives)}개를 출력 폴더 밖에 보존합니다.\n'
+            '병합은 시작되지 않습니다. 계속할까요?',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if decision != QMessageBox.StandardButton.Yes:
+            return
+        self.recovery_apply_button.setEnabled(False)
+        self.status.setText('복구 적용 중: 전체 조건 재검사 및 증거 보존...')
+        worker = DailyRecoveryApplyWorker(plan, tuple(self.groups))
+        worker.ready.connect(self.show_recovery_applied)
+        self.start_worker(worker)
+
+    def show_recovery_applied(self, evidence):
+        self.recovery_plan = None
+        self.invalidate_plan()  # Fresh preview is mandatory before a new merge.
+        self.status.setText('증거 보존 완료. 새 병합 계획 미리보기가 필요합니다.')
+        QMessageBox.information(
+            self, '복구 준비 완료 — 자동 병합하지 않음',
+            f'증거 보존 폴더:\n{evidence}\n\n'
+            '원본과 완료된 출력, 체크포인트는 유지했습니다.\n'
+            '미완료 그룹을 다시 병합하려면 계획을 새로 미리보고 실행하세요.'
+        )
+
+    def start_recovery_inspection(self):
+        if self.worker is not None:
+            return
+        # A changed plan is invalidated by existing textChanged handlers.
+        expected = tuple(g.output_name for g in self.groups)
+        worker = DailyRecoveryInspectWorker(self.output_edit.text().strip(), expected)
+        worker.ready.connect(self.show_recovery_inspection)
+        self.status.setText('출력 폴더 중단 상태 읽기 전용 진단 중...')
+        self.start_worker(worker)
+
+    def show_recovery_inspection(self, body: str):
+        dialog = QDialog(self)
+        dialog.setWindowTitle('중단 작업 진단 — 읽기 전용 / 복구 실행 불가')
+        dialog.resize(760, 510)
+        layout = QVBoxLayout(dialog)
+        edit = QPlainTextEdit()
+        edit.setReadOnly(True)
+        edit.setPlainText(body)
+        layout.addWidget(edit)
+        close_button = QPushButton('닫기')
+        close_button.clicked.connect(dialog.accept)
+        layout.addWidget(close_button)
+        dialog.exec()
+        self.status.setText('진단 완료. 출력 파일이나 잠금을 변경하지 않았습니다.')
 
     def start_preview(self):
         if self.worker is not None:
@@ -218,6 +374,7 @@ class DailyBatchDialog(QDialog):
             f'{sum(len(group.files) for group in groups)}개 MKV. 병합은 실행하지 않았습니다.'
         )
         self.execute_button.setEnabled(True)
+        self.recovery_preflight_button.setEnabled(True)
 
     def start_execution(self):
         if self.worker is not None or not self.groups:
