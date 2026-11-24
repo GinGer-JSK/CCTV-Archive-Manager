@@ -15,7 +15,8 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QGroupBox, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
-    QProgressBar, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QProgressBar, QScrollArea, QSizePolicy, QSpinBox,
+    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from . import __version__
@@ -224,15 +225,26 @@ class MainWindow(QMainWindow):
         self.current_groups = []
         self.view_mode = None
         self.setWindowTitle(f"CCTV Archive Manager Lite - {__version__}")
-        self.resize(1100, 860)
-        self.setMinimumSize(850, 640)
+        # Baseline is the user-verified compact layout (Qt logical pixels).
+        # Larger windows give the extra height to the recording-date table.
+        self.resize(1100, 1160)
+        self.setMinimumSize(1100, 1160)
         self.setup_ui()
 
     def setup_ui(self):
+        # A single main scroll area keeps all controls accessible when the
+        # window is resized. The merge pane itself never changes height.
+        central_scroll = QScrollArea()
+        central_scroll.setWidgetResizable(True)
+        central_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        central_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        central_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setCentralWidget(central_scroll)
+
         central = QWidget()
-        self.setCentralWidget(central)
+        central_scroll.setWidget(central)
         layout = QVBoxLayout(central)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
 
         title = QLabel("CCTV Archive Manager Lite")
         title.setStyleSheet("font-size: 22px; font-weight: bold;")
@@ -283,7 +295,13 @@ class MainWindow(QMainWindow):
         self.table.setAlternatingRowColors(True)
         self.table.setSortingEnabled(True)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        layout.addWidget(self.table, 3)
+        # This is the ONLY vertically expanding area.  The date list shows
+        # more rows when the window grows, while the merge pane stays fixed.
+        self.table.setMinimumHeight(135)
+        self.table.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        layout.addWidget(self.table, 1)
 
         group_box = QGroupBox("병합 계획 및 실행")
         group_layout = QVBoxLayout(group_box)
@@ -322,6 +340,11 @@ class MainWindow(QMainWindow):
         self.plan_button.clicked.connect(self.start_plan)
         group_layout.addWidget(self.plan_button)
 
+        self.daily_dialog_button = QPushButton("여러 날짜 일괄 병합 / 중단 후 재개...")
+        self.daily_dialog_button.setToolTip("날짜 범위를 직접 지정하고 미리보기 후에만 실행합니다.")
+        self.daily_dialog_button.clicked.connect(self.open_daily_dialog)
+        group_layout.addWidget(self.daily_dialog_button)
+
         self.plan_table = QTableWidget()
         self.plan_table.setColumnCount(5)
         self.plan_table.setHorizontalHeaderLabels(
@@ -332,6 +355,29 @@ class MainWindow(QMainWindow):
         self.plan_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.plan_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch
+        )
+        # Reserve exactly four visible rows for the single-day merge preview.
+        # With more groups, the table itself scrolls rather than shrinking to
+        # a single row under the large date-list widget.
+        self.plan_table.verticalHeader().setDefaultSectionSize(30)
+        self.plan_table.verticalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Fixed
+        )
+        self.plan_table.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        preview_height = (
+            self.plan_table.horizontalHeader().sizeHint().height()
+            + 4 * self.plan_table.verticalHeader().defaultSectionSize()
+            + self.plan_table.horizontalScrollBar().sizeHint().height()
+            + 2 * self.plan_table.frameWidth() + 2
+        )
+        # Four rows remain visible inside the preview table; if the window is
+        # smaller, its *parent* scroll area scrolls rather than overlaying the
+        # controls placed below this table.
+        self.plan_table.setFixedHeight(preview_height)
+        self.plan_table.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         group_layout.addWidget(self.plan_table)
 
@@ -366,7 +412,13 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("%p%")
         group_layout.addWidget(self.progress_bar)
-        layout.addWidget(group_box, 2)
+        # Keep the complete merge pane at a constant height, large enough
+        # for four preview rows and all three action buttons/progress bars.
+        # A smaller main window scrolls the whole page; widgets never overlap.
+        group_layout.activate()
+        merge_panel_height = max(650, group_layout.sizeHint().height() + 28)
+        group_box.setFixedHeight(merge_panel_height)
+        layout.addWidget(group_box, 0)
 
         self.status_label = QLabel("준비 완료")
         layout.addWidget(self.status_label)
@@ -433,7 +485,7 @@ class MainWindow(QMainWindow):
             self.source_edit, self.source_button, self.database_edit,
             self.database_button, self.cache_button, self.sync_button,
             self.scan_button, self.output_edit, self.output_button,
-            self.parts_spin, self.split_mode, self.plan_button, self.table, self.plan_table,
+            self.parts_spin, self.split_mode, self.plan_button, self.daily_dialog_button, self.table, self.plan_table,
         )
         for widget in widgets:
             widget.setEnabled(not busy)
@@ -648,6 +700,20 @@ class MainWindow(QMainWindow):
         self.mode_label.setText("조회 방식: NVR 직접 검색 (SQLite 캐시 미반영)")
         self.status_label.setText(f"NVR 검색 완료: {elapsed:.3f}초")
         self.statusBar().showMessage("NVR 직접 검색 완료. 원본 변경 없음.")
+
+    def open_daily_dialog(self):
+        if self.worker is not None:
+            return
+        from .daily_gui import DailyBatchDialog
+        dialog = DailyBatchDialog(
+            source=self.source_edit.text().strip(),
+            database=self.database_edit.text().strip(),
+            output=self.output_edit.text().strip(),
+            parts=self.parts_spin.value(),
+            mode=self.split_mode.currentData(),
+            parent=self,
+        )
+        dialog.exec()
 
     def start_plan(self):
         if self.worker is not None:
