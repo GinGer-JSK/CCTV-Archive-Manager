@@ -7,6 +7,7 @@ Does not modify source MKVs.
 
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -23,8 +24,8 @@ from .file_scanner import scan_recordings
 from .filename_parser import parse_recording_filename
 from .incremental_sync import sync_new_recordings
 from .merge_planner import plan_merge_groups
-from .progress_merger import merge_with_progress
-from .batch_merger import GroupMergeError, merge_groups
+from .progress_merger import MergeCancelled, merge_with_progress
+from .batch_merger import BatchMergeCancelled, GroupMergeError, merge_groups
 
 DEFAULT_SOURCE = r"\\nvr\NVR_Record\Door\video\WSGXN"
 DEFAULT_DATABASE = r"C:\CCTV-Archive-Manager\data\catalog.sqlite3"
@@ -131,11 +132,16 @@ class MergeWorker(BaseWorker):
     """Execute one merge and forward mkvmerge progress to the GUI."""
 
     progress_changed = Signal(int)
+    cancelled = Signal(str)
 
     def __init__(self, files, output, parent=None):
         super().__init__(parent)
         self.files = tuple(files)
         self.output = Path(output)
+        self.cancel_event = threading.Event()
+
+    def request_cancel(self):
+        self.cancel_event.set()
 
     def run(self):
         try:
@@ -143,8 +149,11 @@ class MergeWorker(BaseWorker):
             result = merge_with_progress(
                 self.files, self.output,
                 on_progress=self.progress_changed.emit,
+                cancel_event=self.cancel_event,
             )
             self.result_ready.emit((result, time.perf_counter() - started))
+        except MergeCancelled as exc:
+            self.cancelled.emit(str(exc))
         except Exception as exc:
             self.error_occurred.emit(str(exc))
 
@@ -154,12 +163,17 @@ class BatchMergeWorker(BaseWorker):
 
     group_progress_changed = Signal(int, int, int)
     batch_failed = Signal(object)
+    batch_cancelled = Signal(object)
 
     def __init__(self, groups, output_dir, parent=None):
         super().__init__(parent)
         # Snapshot the immutable plan before the background task begins.
         self.groups = tuple(groups)
         self.output_dir = Path(output_dir)
+        self.cancel_event = threading.Event()
+
+    def request_cancel(self):
+        self.cancel_event.set()
 
     def run(self):
         started = time.perf_counter()
@@ -168,8 +182,11 @@ class BatchMergeWorker(BaseWorker):
                 self.groups,
                 self.output_dir,
                 on_progress=self.group_progress_changed.emit,
+                cancel_event=self.cancel_event,
             )
             self.result_ready.emit((result, time.perf_counter() - started))
+        except BatchMergeCancelled as exc:
+            self.batch_cancelled.emit((exc, time.perf_counter() - started))
         except Exception as exc:
             self.batch_failed.emit((exc, time.perf_counter() - started))
 
@@ -294,6 +311,12 @@ class MainWindow(QMainWindow):
         group_layout.addWidget(self.merge_button)
         group_layout.addWidget(self.merge_all_button)
 
+        self.cancel_button = QPushButton("현재 병합 작업 취소")
+        self.cancel_button.setMinimumHeight(38)
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self.request_merge_cancel)
+        group_layout.addWidget(self.cancel_button)
+
         self.batch_progress_label = QLabel("전체 그룹 진행률: 대기 중")
         group_layout.addWidget(self.batch_progress_label)
         self.batch_progress_bar = QProgressBar()
@@ -379,6 +402,11 @@ class MainWindow(QMainWindow):
         for widget in widgets:
             widget.setEnabled(not busy)
         self.update_merge_button()
+        self.cancel_button.setEnabled(
+            busy
+            and isinstance(self.worker, (MergeWorker, BatchMergeWorker))
+            and not self.worker.cancel_event.is_set()
+        )
 
     def update_merge_button(self):
         row = self.plan_table.currentRow()
@@ -391,6 +419,55 @@ class MainWindow(QMainWindow):
         self.merge_button.setEnabled(valid)
         self.merge_all_button.setEnabled(
             self.worker is None and bool(self.current_groups)
+        )
+
+    def request_merge_cancel(self):
+        """Non-blocking cancellation; never wait on the GUI thread."""
+        worker = self.worker
+        if not isinstance(worker, (MergeWorker, BatchMergeWorker)):
+            return
+        if worker.cancel_event.is_set():
+            return
+        worker.request_cancel()
+        self.cancel_button.setEnabled(False)
+        self.status_label.setText("병합 취소 요청됨 — 프로세스 종료를 확인 중...")
+        self.statusBar().showMessage(
+            "취소를 처리하고 있습니다. 작업이 종료될 때까지 창을 유지하세요. "
+            "SMB 사전 검증 중에는 취소 반영이 지연될 수 있습니다."
+        )
+
+    def show_merge_cancelled(self, message):
+        self.progress_label.setText("병합 취소됨")
+        self.status_label.setText("병합 취소 완료")
+        self.statusBar().showMessage(
+            "미완료 .partial.mkv는 보존됩니다. 재시도 전에 확인하세요."
+        )
+        self.clear_plan()
+        QMessageBox.information(
+            self, "MKV 병합 취소",
+            f"{message}\n\n최종 출력 파일은 생성되지 않았습니다. "
+            "미완료 파일은 보존될 수 있습니다.",
+        )
+
+    def show_batch_cancelled(self, payload):
+        exc, elapsed = payload
+        completed_paths = "\n".join(str(item.output) for item in exc.completed)
+        self.progress_label.setText("현재 그룹 병합 취소됨")
+        self.batch_progress_label.setText(
+            f"전체 그룹 취소: {len(exc.completed)}/{exc.total_groups}개 완료"
+        )
+        self.status_label.setText("전체 그룹 병합 취소 완료")
+        self.statusBar().showMessage(
+            "완료된 MKV는 보존됩니다. 미완료 .partial.mkv는 재시도 전에 확인하세요."
+        )
+        self.clear_plan()
+        QMessageBox.information(
+            self, "전체 MKV 병합 취소",
+            f"취소 그룹: {exc.cancelled_group}/{exc.total_groups}\n"
+            f"완료된 그룹: {len(exc.completed)}개\n"
+            f"소요시간: {elapsed:.2f}초\n\n"
+            f"보존된 결과물:\n{completed_paths or '없음'}\n\n"
+            "취소된 그룹의 .partial.mkv는 재생되지 않을 수 있습니다.",
         )
 
     def start_worker(self, worker):
@@ -624,10 +701,11 @@ class MainWindow(QMainWindow):
         self.progress_label.setText("병합 진행률: 0% (시작 중)")
         self.status_label.setText(f"실제 병합 실행 중: {group.output_name}")
         self.statusBar().showMessage(
-            "mkvmerge 진행률을 수집 중입니다. 작업 취소 기능은 아직 없습니다."
+            "mkvmerge 진행률을 수집 중입니다. 취소 버튼을 사용할 수 있습니다."
         )
         worker = MergeWorker(inputs, destination, self)
         worker.progress_changed.connect(self.show_merge_progress)
+        worker.cancelled.connect(self.show_merge_cancelled)
         worker.result_ready.connect(self.show_merge_result)
         self.start_worker(worker)
 
@@ -693,7 +771,7 @@ class MainWindow(QMainWindow):
             f"출력 폴더: {output_dir}\n\n"
             f"{summary}\n\n"
             "각 그룹을 순서대로 병합하고 오류가 발생하면 즉시 중단합니다.\n"
-            "현재 작업 취소 기능은 없습니다. 계속하시겠습니까?",
+            "실행 중 취소할 수 있으며 완료 그룹은 보존됩니다. 계속하시겠습니까?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -715,6 +793,7 @@ class MainWindow(QMainWindow):
         worker.group_progress_changed.connect(self.show_batch_progress)
         worker.result_ready.connect(self.show_batch_result)
         worker.batch_failed.connect(self.show_batch_error)
+        worker.batch_cancelled.connect(self.show_batch_cancelled)
         self.start_worker(worker)
 
     def show_batch_progress(self, index, total, percent):
@@ -793,10 +872,28 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "작업 오류", message)
 
     def closeEvent(self, event):
-        if self.worker is not None and self.worker.isRunning():
-            QMessageBox.information(
-                self, "작업 진행 중", "현재 작업이 끝난 후 종료해 주세요."
-            )
+        worker = self.worker
+        if worker is not None and worker.isRunning():
+            if isinstance(worker, (MergeWorker, BatchMergeWorker)):
+                if not worker.cancel_event.is_set():
+                    answer = QMessageBox.question(
+                        self, "병합 작업 진행 중",
+                        "병합 중에는 바로 창을 닫을 수 없습니다.\n"
+                        "현재 병합을 취소하시겠습니까?\n"
+                        "취소가 완료되면 창을 다시 닫아 주세요.",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No,
+                    )
+                    if answer == QMessageBox.StandardButton.Yes:
+                        self.request_merge_cancel()
+                else:
+                    self.statusBar().showMessage(
+                        "취소 처리가 진행 중입니다. 완료 후 창을 닫아 주세요."
+                    )
+            else:
+                QMessageBox.information(
+                    self, "작업 진행 중", "현재 작업이 끝난 후 종료해 주세요."
+                )
             event.ignore()
             return
         super().closeEvent(event)
