@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Sequence
 
+from .output_integrity import OutputIntegrityReport
+
 from .merge_planner import MergeGroup, plan_merge_groups
 
 MANIFEST_NAME = '.cctv-daily-resume.json'
@@ -111,7 +113,9 @@ def _artifact_paths(path: Path) -> tuple[Path, Path]:
 
 
 def _check_artifacts(groups: Sequence[MergeGroup], output_dir: Path,
-                     completed: dict) -> tuple[list[MergeGroup], list[str]]:
+                     completed: dict,
+                     integrity_verifier: Callable[[Path], OutputIntegrityReport] | None = None
+                     ) -> tuple[list[MergeGroup], list[str]]:
     pending, skipped = [], []
     seen_outputs = set()
     for group in groups:
@@ -134,6 +138,16 @@ def _check_artifacts(groups: Sequence[MergeGroup], output_dir: Path,
             if (stat.st_size <= 0 or saved.get('bytes') != stat.st_size or
                     saved.get('modified_ns') != stat.st_mtime_ns):
                 raise ResumeConflict(f'completed file changed: {dest}')
+            if integrity_verifier is not None:
+                expected = saved.get('sha256')
+                if not isinstance(expected, str) or len(expected) != 64:
+                    raise ResumeConflict(f'no verified digest in checkpoint: {dest}')
+                try:
+                    report = integrity_verifier(dest)
+                except Exception as exc:
+                    raise ResumeConflict(f'MKV integrity verification failed: {dest}: {exc}') from exc
+                if report.bytes != stat.st_size or report.sha256 != expected:
+                    raise ResumeConflict(f'MKV integrity digest mismatch: {dest}')
             skipped.append(name)
         elif dest.exists():
             raise ResumeConflict(f'untracked output, will not overwrite: {dest}')
@@ -149,6 +163,7 @@ def run_daily_resume(
     cancel_event: threading.Event | None = None,
     on_progress: Callable[[str, int, int], None] | None = None,
     merge_one: Callable[[MergeGroup, Path, threading.Event | None, Callable[[int], None]], object] | None = None,
+    integrity_verifier: Callable[[Path], OutputIntegrityReport] | None = None,
 ) -> DailyResumeResult:
     """Run all groups sequentially, checkpointing each verified-by-metadata output.
 
@@ -182,7 +197,7 @@ def run_daily_resume(
                 raise ResumeConflict('source metadata or group plan changed; cannot resume')
         else:
             manifest = {'version': 1, 'signature': sig, 'completed': {}}
-        pending, skipped = _check_artifacts(groups, destdir, manifest['completed'])
+        pending, skipped = _check_artifacts(groups, destdir, manifest['completed'], integrity_verifier)
         if not manifest_path.exists():
             _write_manifest(manifest_path, manifest)
         finished = []
@@ -213,12 +228,24 @@ def run_daily_resume(
             # Do not checkpoint if any source changed during this operation.
             if _signature(groups) != sig:
                 raise ResumeConflict('source changed while merging; checkpoint withheld')
+            report = None
+            if integrity_verifier is not None:
+                try:
+                    report = integrity_verifier(out)
+                except Exception as exc:
+                    raise ResumeConflict(f'MKV integrity verification failed: {out}: {exc}') from exc
             stat = out.stat()
+            if report is not None and report.bytes != stat.st_size:
+                raise ResumeConflict(f'output changed after verification: {out}')
             manifest['completed'][group.output_name] = {
                 'bytes': stat.st_size,
                 'modified_ns': stat.st_mtime_ns,
                 'saved_at': datetime.now(timezone.utc).isoformat(),
             }
+            if report is not None:
+                manifest['completed'][group.output_name]['sha256'] = report.sha256
+                manifest['completed'][group.output_name]['integrity_method'] = (
+                    'decode+sha256' if report.decoded else 'identify+sha256')
             _write_manifest(manifest_path, manifest)
             finished.append(group.output_name)
         return DailyResumeResult(tuple(finished), tuple(skipped), len(groups), False)

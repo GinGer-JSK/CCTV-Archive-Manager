@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from .catalog_reader import get_catalog_snapshot
 from .daily_resume import plan_cached_days, run_daily_resume
+from .output_integrity import inspect_mkv_output
 
 MAX_DAYS = 7  # Separate deliberate runs for larger archives.
 MAX_OUTPUTS = 28
@@ -84,6 +85,7 @@ class DailyExecuteWorker(QThread):
                 self.groups, self.output, cancel_event=self.cancel_event,
                 on_progress=lambda name, finished, percent:
                     self.progress.emit(name, finished, percent),
+                integrity_verifier=inspect_mkv_output,
             )
             self.ready.emit((result, time.perf_counter() - started))
         except Exception as exc:
