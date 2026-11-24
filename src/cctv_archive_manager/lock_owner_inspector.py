@@ -30,6 +30,7 @@ class ProcessInfo:
     name: str
     creation_time: datetime | None
     command_line: str | None
+    parent_pid: int | None = None
 
 
 @dataclass(frozen=True)
@@ -75,7 +76,7 @@ def windows_process_snapshot() -> tuple[ProcessInfo, ...]:
 
     script = (
         "@(Get-CimInstance Win32_Process | "
-        "Select-Object ProcessId, Name, CreationDate, CommandLine) "
+        "Select-Object ProcessId, ParentProcessId, Name, CreationDate, CommandLine) "
         "| ConvertTo-Json -Depth 3 -Compress"
     )
     completed = subprocess.run(
@@ -101,6 +102,7 @@ def windows_process_snapshot() -> tuple[ProcessInfo, ...]:
             name=str(item.get("Name") or ""),
             creation_time=created,
             command_line=item.get("CommandLine"),
+            parent_pid=item.get("ParentProcessId") if isinstance(item.get("ParentProcessId"), int) else None,
         ))
     return tuple(result)
 
