@@ -9,7 +9,7 @@ from pathlib import Path
 
 # 예: 2026-09-02_00-06-03_454.mkv
 FILENAME_PATTERN = re.compile(
-    r"^(?P<date>\d{4}-\d{2}-\d{2})_"
+    r"^(?:(?P<prefix>[^/\\\r\n]+)_)?(?P<date>\d{4}-\d{2}-\d{2})_"
     r"(?P<hour>\d{2})-"
     r"(?P<minute>\d{2})-"
     r"(?P<second>\d{2})_"

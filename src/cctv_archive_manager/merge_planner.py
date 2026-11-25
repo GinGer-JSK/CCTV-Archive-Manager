@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Sequence
 
 from .filename_parser import parse_recording_filename
+from .source_guard import validate_single_source
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,8 @@ def plan_merge_groups(
 
     if len(set(paths)) != len(paths):
         raise ValueError("중복된 파일 경로가 존재합니다.")
+
+    validate_single_source(paths)
 
     recordings = []
 

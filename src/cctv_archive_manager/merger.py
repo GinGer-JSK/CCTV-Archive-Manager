@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Sequence
 
 from .filename_parser import parse_recording_filename
+from .source_guard import validate_single_source
 
 
 DEFAULT_MKVMERGE = Path(
@@ -92,12 +93,13 @@ def prepare_merge(
             "이번 테스트에서는 같은 날짜의 파일만 병합합니다."
         )
 
+    validate_single_source(resolved_sources)
+    validate_single_source(source_files)
+
     # 파일명에 포함된 녹화 시작 시각을 기준으로 정렬
     ordered = sorted(
         source_files,
-        key=lambda p: parse_recording_filename(
-            p.name
-        ).recorded_at,
+        key=lambda p: (parse_recording_filename(p.name).recorded_at, str(p)),
     )
 
     command = [

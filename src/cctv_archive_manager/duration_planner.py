@@ -5,13 +5,13 @@ Accepts RecordingDuration-like objects with `path` and `duration_ms`.
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol, Sequence
 
-_FILENAME = re.compile(r"^(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})_(\d{3})\.mkv$", re.IGNORECASE)
+from .filename_parser import parse_recording_filename
+from .source_guard import validate_single_source
 
 
 class HasRecordingDuration(Protocol):
@@ -53,14 +53,10 @@ def plan_duration_groups(
     day: str | None = None
     for recording in recordings:
         path = Path(recording.path)
-        match = _FILENAME.fullmatch(path.name)
-        if match is None:
+        info = parse_recording_filename(path.name)
+        if info is None:
             raise ValueError(f"invalid Agent DVR MKV filename: {path.name}")
-        date, h, m, s, millis = match.groups()
-        try:
-            timestamp = datetime.strptime(f"{date} {h}:{m}:{s}.{millis}", "%Y-%m-%d %H:%M:%S.%f")
-        except ValueError as exc:
-            raise ValueError(f"invalid recording timestamp: {path.name}") from exc
+        date, timestamp = info.date, info.recorded_at
         if day is not None and day != date:
             raise ValueError("recordings from different dates cannot be mixed")
         day = date
@@ -73,8 +69,10 @@ def plan_duration_groups(
             raise ValueError(f"duration_ms must be a positive integer: {path}")
         entries.append((timestamp, path, duration, date))
 
+    validate_single_source([entry[1] for entry in entries])
+
     # Filename timestamps are used only for chronological order.
-    entries.sort(key=lambda x: (x[0], str(x[1]).casefold()))
+    entries.sort(key=lambda x: (x[0], str(x[1])))
     n = len(entries)
     prefix = [0]
     for entry in entries:
