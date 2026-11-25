@@ -34,3 +34,19 @@ htmlcov/
 data/
 logs/
 output/
+
+# SQLite runtime sidecar files
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.db-wal
+*.db-shm
+*.db-journal
+
+# CCTV Archive Manager runtime recovery artifacts
+*.mkv.lock
+.cctv-daily-resume.json
+.cctv-daily-resume.lock
