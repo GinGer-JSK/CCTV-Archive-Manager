@@ -2,12 +2,45 @@
 
 이 문서는 개발 마일스톤별 변경 사항을 기록합니다. 아직 정식 릴리스 버전 변경은 아닙니다. / This log records development milestones, not new formal releases.
 
-## [Unreleased] — Part 5-2 (planned / 예정)
+## [Unreleased] — Part 5-3 (proposed / 검토 예정)
 
-- 다양한 타임스탬프 형식을 위한 확장형 패턴 파서 및 기존 인터페이스 호환성. / Extensible pattern parser with backward-compatible interfaces.
-- `YYYYMMDD-HHmmss`, `YYYY_MM_DD_HH_mm_ss_SSS` 등 지원 검토. / Evaluate additional timestamp formats, including the two examples above.
-- 소스 격리 및 모호한 시간 해석 방지. / Preserve source isolation and reject ambiguous interpretations.
-- 사용자 정의 템플릿, 프리셋 및 미리보기는 후속 단계에서 검토. / Custom templates, presets and previews are candidates for a later milestone.
+- 사용자 정의 파일명 템플릿, 프리셋 및 분석 미리보기 검토. / Evaluate custom filename templates, presets and parsing previews.
+- Part 6 작업 엔진 연동 및 원클릭 복구는 기존 보류 상태 유지. / Part 6 engine integration and one-click recovery remain paused.
+
+## 2026-11-27 — Part 5-2: Multi-format filename parser
+
+### Added and changed | 개선 사항
+
+- 12개 내장 타임스탬프 패턴(P01–P12) 및 선택적 접두사·접미사 자동 분석. / Automatic recognition of 12 built-in timestamp patterns with optional prefixes and suffixes.
+- `RecordingInfo` 및 기존 공개 파서 인터페이스 유지, `FilenameMatch` 및 `analyze_recording_filename()` 추가. / Preserve `RecordingInfo` and the existing public parser interface; add detailed match metadata.
+- 밀리초 생략 시 0ms 적용, 잘못된 날짜·시간 및 모호한 타임스탬프 거부. / Default omitted milliseconds to zero; reject invalid dates/times and ambiguous timestamps.
+- Source Guard를 다중 패턴 분석과 연동하여 혼합 폴더, 충돌 이름 집합 및 채널 ID 차단. / Integrate Source Guard with multi-format parsing and reject mixed folders, conflicting label sets and channel IDs.
+- 기존 SQLite 카탈로그 스키마 및 GUI 코드 유지. / Retain the existing catalog schema and GUI code.
+- 신규 회귀 테스트 5개 추가. / Add five regression tests.
+
+### Validation | 검증 결과
+
+| 항목 / Check | 결과 / Result |
+|---|---|
+| 기존 C500 파일명 / Legacy C500 exact matches | 7,857/7,857 PASS; 0 mismatches |
+| 기존·신규 파서 시간 / Legacy vs new parser | 0.138369 s / 0.248854 s (single run) |
+| 정상 가상 파일명 / Synthetic valid filenames | 57,600/57,600 PASS |
+| 비정상 파일명 거부 / Invalid filename rejection | 18/18 PASS |
+| 전체 가상 검사 / Synthetic matrix | 57,618/57,618 PASS (4.344 s) |
+| 실제 MKV 패턴 적용 / Real MKV renamed copies | 12/12 PASS |
+| A/B 병합 및 메타데이터 / Real A/B merges and metadata | 6/6 PASS; max duration difference 348 ms |
+| 로컬 입력 해시 / Local input SHA-256 | 12/12 unchanged |
+| SQLite 카탈로그 / SQLite catalog | 12 rows; integrity_check: ok |
+| 재생시간 캐시 / Duration cache | 12 probes → 12 hits, 0 probes |
+| 실제 GUI 조회·계획 / Real GUI lookup and planning | PASS; 6 screenshots, 0 dialogs |
+| 회귀 테스트 / Regression suite | 215 passed, 1 skipped, 0 failed (216 total; 2.569 s) |
+
+### Limitations | 제한사항
+
+- 내장 패턴에 대한 검증이며 사용자 정의 규칙 및 모든 제조사 호환성은 미검증입니다. / Built-in patterns were validated; custom rules and universal vendor compatibility remain unverified.
+- 실제 병합은 메타데이터 검사 기준이며 전체 디코딩은 미실행입니다. / Real merges were checked at metadata level; full decoding was not performed.
+- 외장 HDD 원본 해시는 복사 시 비교했고 최종 재시도에서는 크기·수정 시각만 재확인했습니다. 초기 I/O 오류 원인은 미확정입니다. / External original hashes were compared at copy time; the final retry rechecked size and modification time only. The initial I/O error remains unexplained.
+- 운영 DB 미사용, 기존 무결성 정책 유지. 심볼릭 링크 테스트 1개는 권한 제한으로 건너뛰었습니다. / Production DB not used; integrity policy unchanged. One symlink test was skipped due to permissions.
 
 ## 2026-11-27 — Part 5-1: Filename compatibility validation
 
@@ -44,7 +77,7 @@ C500 8개 파일의 계획 기준 Part 간 편차: A 1,241.288초 → B 559.482�
 
 ### Limitations | 제한사항
 
-- 현재 타임스탬프는 `YYYY-MM-DD_HH-mm-ss_SSS`로 고정되어 있으며 접미사 및 밀리초 생략은 지원하지 않습니다. / The timestamp format remains fixed; suffixes and omitted milliseconds are unsupported.
+- 제5-1부 당시 타임스탬프는 `YYYY-MM-DD_HH-mm-ss_SSS`로 고정되어 있었으며 접미사 및 밀리초 생략은 미지원이었습니다(제5-2부에서 확장). / At Part 5-1, the timestamp format was fixed, without suffix or omitted-millisecond support (expanded in Part 5-2).
 - 병합 결과의 전체 디코딩과 SEI/DTS 원인 조사는 보류했습니다. 메타데이터 검사 성공은 프레임 단위 무결성을 보장하지 않습니다. / Full output decoding and SEI/DTS investigation were deferred; metadata checks do not guarantee frame-level integrity.
 - 전체 데이터 병합이나 모든 NVR 형식 호환을 검증한 것은 아닙니다. / Neither full-inventory merging nor universal NVR compatibility was verified.
 - 기존 무결성 정책은 유지했습니다. / Existing integrity policy remains unchanged.

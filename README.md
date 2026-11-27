@@ -5,8 +5,8 @@
   <img alt="PySide6" src="https://img.shields.io/badge/GUI-PySide6-41CD52?logo=qt&logoColor=white">
   <img alt="Windows 11" src="https://img.shields.io/badge/Platform-Windows%2011-0078D4">
   <img alt="Alpha" src="https://img.shields.io/badge/Version-0.1.0a0-orange">
-  <img alt="210 passed, 1 skipped" src="https://img.shields.io/badge/Tests-210%20passed%20%7C%201%20skipped-brightgreen">
-  <img alt="Part 5-1 validated" src="https://img.shields.io/badge/Development-Part%205--1%20validated-blue">
+  <img alt="215 passed, 1 skipped" src="https://img.shields.io/badge/Tests-215%20passed%20%7C%201%20skipped-brightgreen">
+  <img alt="Part 5-2 validated" src="https://img.shields.io/badge/Development-Part%205--2%20validated-blue">
 </p>
 <p align="center">One Core, Two Editions — Lite &amp; Pro</p>
 
@@ -35,12 +35,13 @@ The screenshot shows a file-count-based merge plan in the development build, not
 |---|---|---|
 | MKV 검색 및 날짜·시간 분류 | MKV discovery and chronological cataloging | Implemented |
 | 유연한 파일명 접두사 및 기존 규칙 호환 | Flexible filename prefixes and backward compatibility | Implemented — Part 5-1 |
-| 단일 소스 폴더 및 접두사 충돌 검사 | Single-source folder and prefix conflict checks | Implemented — Part 5-1 |
-| 다중 타임스탬프 형식 | Multiple timestamp formats | Planned — Part 5-2 |
+| 단일 소스 폴더 및 접두사·접미사 충돌 검사 | Single-source folder and prefix/suffix conflict checks | Implemented — Part 5-2 |
+| 12개 내장 타임스탬프 형식 및 선택적 접미사 | 12 built-in timestamp formats and optional suffixes | Implemented — Part 5-2 |
+| 사용자 정의 파일명 템플릿 및 미리보기 | Custom filename templates and preview | Proposed — Part 5-3 |
 | SQLite 캐시 및 증분 동기화 | SQLite caching and incremental synchronization | Implemented |
 | SMB 원본 조회 | SMB source access | Implemented |
 | 파일 개수 / 실제 재생시간 균등 분할 | File-count / duration-based partitioning | Implemented |
-| FFprobe 재생시간 캐싱 | FFprobe duration caching | Implemented |
+| MKV 재생시간 캐싱 | MKV duration caching | Implemented |
 | 재인코딩 없는 MKV 병합 | MKV merging without re-encoding | Implemented |
 | 날짜별 일괄 병합 및 미리보기 (최대 7일) | Multi-day batch planning and merging (up to 7 days) | Implemented |
 | JSON 체크포인트 및 완료 그룹 재사용 | JSON checkpoints and completed-group reuse | Implemented |
@@ -52,31 +53,49 @@ The screenshot shows a file-count-based merge plan in the development build, not
 
 ### 3.1. Supported Recording Filenames | 지원 파일명 규칙
 
-현재는 Agent DVR 형식의 타임스탬프를 사용하며, 선택적 접두사를 지원합니다. / The current parser supports Agent DVR-style timestamps with an optional prefix.
+제5-2부부터 12개 내장 타임스탬프 패턴을 자동으로 분석하며, 한 소스 폴더에서 서로 다른 형식을 함께 사용할 수 있습니다. / Part 5-2 automatically recognizes 12 built-in timestamp patterns, including mixed formats in a single source folder.
+
+| ID | Timestamp format | Example (.mkv) |
+|---|---|---|
+| P01 | `YYYY-MM-DD_HH-mm-ss_SSS` | `2026-11-25_19-43-05_859.mkv` |
+| P02 | `YYYY-MM-DD_HH-mm-ss` | `2026-11-25_19-43-05.mkv` |
+| P03 | `YYYYMMDD-HHmmss` | `20261125-194305.mkv` |
+| P04 | `YYYYMMDD_HHmmss` | `20261125_194305.mkv` |
+| P05 | `YYYYMMDDHHmmss` | `20261125194305.mkv` |
+| P06 | `YYYY_MM_DD_HH_mm_ss_SSS` | `2026_11_25_19_43_05_859.mkv` |
+| P07 | `YYYY_MM_DD_HH_mm_ss` | `2026_11_25_19_43_05.mkv` |
+| P08 | `YYYY-MM-DD_HHmmss` | `2026-11-25_194305.mkv` |
+| P09 | `YYYYMMDD_HHmmss_SSS` | `20261125_194305_859.mkv` |
+| P10 | `YYYY-MM-DD_HH-mm-ss-SSS` | `2026-11-25_19-43-05-859.mkv` |
+| P11 | `YYYYMMDD-HHmmss-SSS` | `20261125-194305-859.mkv` |
+| P12 | `YYYYMMDDHHmmssSSS` | `20261125194305859.mkv` |
+
+선택적 접두사와 접미사는 밑줄(`_`)로 타임스탬프와 구분합니다. / Optional prefixes and suffixes are separated from the timestamp by underscores (`_`).
 
 ```text
-YYYY-MM-DD_HH-mm-ss_SSS.mkv
-PREFIX_YYYY-MM-DD_HH-mm-ss_SSS.mkv
+TIMESTAMP.mkv
+PREFIX_TIMESTAMP.mkv
+TIMESTAMP_SUFFIX.mkv
+PREFIX_TIMESTAMP_SUFFIX.mkv
 ```
 
 | 예시 / Example | 상태 / Status |
 |---|---|
-| `2026-11-25_19-43-05_859.mkv` | Supported |
 | `4_2026-11-25_19-43-05_859.mkv` | Supported |
 | `[CH1]C545D-Wide_2026-11-25_19-43-05_859.mkv` | Supported |
 | `현관 카메라_2026-11-25_19-43-05_859.mkv` | Supported |
-| `20261125-194305.mkv` | Planned |
-| `2026_11_25_19_43_05_859.mkv` | Planned |
-| `2026-11-25_19-43-05.mkv` | Not yet supported |
-| `20261125-194305_CH1.mkv` | Not yet supported |
+| `20261125-194305_CH1.mkv` | Supported |
+| `C500_20261125194305_C500.mkv` | Supported |
 
-숫자, 영문, 한글, 공백, 대괄호 및 하이픈 등이 포함된 접두사를 허용하며 잘못된 날짜·시간은 거부합니다. `.mkv` 확장자는 대소문자를 구분하지 않습니다. 현재 날짜·시간 구조와 3자리 밀리초는 고정되어 있습니다.
+밀리초가 없는 형식은 0ms로 해석합니다. 잘못된 날짜·시간, 복수의 타임스탬프 후보, 숫자로만 구성된 모호한 접미사 및 지원하지 않는 형식은 거부합니다. `.mkv` 확장자는 대소문자를 구분하지 않으며 파일 수정 시각으로 녹화 시각을 추정하지 않습니다. 기존 `parse_recording_filename()`과 `RecordingInfo` 인터페이스는 유지하며, `analyze_recording_filename()`은 패턴 ID와 접두사·접미사 정보를 추가로 제공합니다.
 
-Prefixes may contain numbers, letters, Korean characters, spaces, brackets and hyphens. Invalid dates and times are rejected. The `.mkv` extension is case-insensitive. The timestamp layout and three-digit milliseconds are currently mandatory.
+Formats without milliseconds use 0 ms. Invalid dates/times, multiple timestamp candidates, ambiguous numeric-only suffixes and unsupported formats are rejected. The `.mkv` extension is case-insensitive; file modification time is not used to infer recording time. The existing `parse_recording_filename()` and `RecordingInfo` interfaces remain compatible; `analyze_recording_filename()` additionally reports the pattern ID, prefix and suffix.
 
-병합 시 한 폴더가 하나의 카메라 소스라는 전제를 사용합니다. 서로 다른 폴더 또는 충돌하는 명시적 카메라 접두사는 거부합니다. 숫자 접두사와 접두사 없는 파일은 동일 폴더에서 공존할 수 있지만, 실제 카메라의 물리적 동일성을 증명하지는 않습니다. 사용자가 소스별로 폴더를 분리해야 합니다.
+병합은 한 폴더가 하나의 카메라 소스라는 전제를 유지합니다. 서로 다른 폴더, 충돌하는 명시적 이름 집합 또는 채널 ID는 거부합니다. 숫자 접두사와 이름 없는 파일은 같은 폴더에 공존할 수 있지만 물리적 카메라 동일성을 증명하지는 않습니다. 파일명 인식 성공이 병합 허용을 의미하지 않으며, 소스별 폴더 분리가 필요합니다.
 
-Merging assumes one camera source per folder. Mixed folders or conflicting explicit camera labels are rejected. Numeric IDs and unprefixed filenames may coexist in a folder but do not prove physical camera identity. Users must keep sources separated.
+Merging still assumes one camera per folder. Mixed folders, conflicting explicit label sets or channel IDs are rejected. Numeric prefixes and unlabeled files may coexist but cannot establish physical camera identity. Filename recognition does not imply merge authorization; users must separate camera sources into distinct folders.
+
+사용자 정의 템플릿, 제조사별 프리셋 및 규칙 미리보기는 아직 구현되지 않았습니다. / Custom templates, vendor presets and rule previews are not yet implemented.
 
 ## 4. Editions & Architecture | 제품 구성 및 공통 엔진
 
@@ -114,9 +133,36 @@ Tailscale을 통한 원격 저장소 접근도 Pro의 검토 대상입니다. / 
 
 ## 5. Development Status | 개발 현황
 
-**Alpha 0.1.0a0 · Part 5-1 validated · 2026-11-27**
+**Alpha 0.1.0a0 · Part 5-2 validated · 2026-11-27**
 
-### Latest validation | 최신 검증 (Part 5-1)
+### Latest validation | 최신 검증 (Part 5-2)
+
+| 검증 항목 / Validation | 결과 / Result |
+|---|---|
+| 내장 패턴 / Built-in patterns | 12 |
+| 기존 C500 파일명 완전 일치 / Legacy exact matches | 7,857/7,857 PASS |
+| 기존 파서 대비 신규 파서 / Legacy vs new parser (single run) | 0.138369 s → 0.248854 s |
+| 정상 가상 파일명 / Synthetic valid filenames | 57,600/57,600 PASS |
+| 비정상 파일명 거부 / Invalid filename rejection | 18/18 PASS |
+| 전체 가상 검사 / Synthetic matrix total | 57,618/57,618 PASS (4.344 s) |
+| 실제 MKV 다중 패턴 / Real MKV mixed-format inputs | 12/12 PASS; 519,287,526 bytes |
+| 실제 A/B 병합·메타데이터 / Real A/B merges and metadata | 6/6 PASS; max duration difference 348 ms |
+| 로컬 입력 SHA-256 / Local input SHA-256 | 12/12 unchanged |
+| SQLite 등록 및 정렬 / SQLite indexing and sorting | 12/12 PASS; integrity_check: ok |
+| 재생시간 캐시 / Duration cache | 12 probes → 12 hits, 0 probes |
+| 최초 분석 → 캐시 조회 / Initial → cached analysis | 0.837347 s → 0.002225 s |
+| 실제 GUI 자동 검증 / Real GUI integration | PASS; 6 screenshots, 0 dialogs, 4.437 s |
+| 전체 회귀 테스트 / Regression suite | 216 total: 215 passed, 1 skipped, 0 failed (2.569 s) |
+
+기존 C500 파일 7,857개의 녹화 시각·접두사 및 공개 파서 반환값이 기존과 일치했습니다. 가상 검사는 12개 패턴 × 8개 접두사 × 6개 접미사 × 100개 시각 조합이며 실제 영상 파일을 생성하지 않았습니다. 실제 영상 검증에서는 동일 소스의 복사본에 12개 형식을 적용했습니다. SQLite 카탈로그 스키마 변경이나 GUI 소스 수정 없이 검색, 조회, 증분 동기화 및 A/B 미리보기를 검증했습니다.
+
+All 7,857 legacy C500 filenames retained their timestamp, prefix and public parser results. The synthetic matrix covered 12 patterns × 8 prefixes × 6 suffixes × 100 timestamps without creating media files. Real media checks used renamed copies from one source. Discovery, catalog lookup, incremental synchronization and A/B GUI previews passed without a catalog schema change or GUI source modification.
+
+실제 병합 검사는 메타데이터 수준이며 전체 디코딩은 수행하지 않았습니다. 외장 HDD 원본은 복사 당시 SHA-256을 대조했고 최종 재시도에서는 크기와 수정 시각만 재확인했습니다. 초기 I/O 오류의 원인은 미확정입니다. 운영 DB는 사용하지 않았으며, 기존 무결성 정책은 변경하지 않았습니다. 모든 제조사 또는 전체 녹화 데이터 병합을 검증한 것은 아닙니다. 심볼릭 링크 테스트 1개는 Windows 권한 제한으로 건너뛰었습니다.
+
+Real merge checks were metadata-level, not full decoding. External originals were hash-checked at copy time; only size and modification time were rechecked in the final retry. The initial I/O error remains unexplained. The production database was not used and integrity policy was unchanged. Universal recorder compatibility and full-inventory merging remain unverified. One symlink test was skipped due to Windows permissions.
+
+### Historical validation | 이전 검증 (Part 5-1 · 2026-11-27)
 
 | 검증 항목 / Validation | 결과 / Result |
 |---|---|
@@ -168,7 +214,7 @@ These are measured results from the Windows test environment. Full-dataset mergi
 | 1–4 | 초기 개발, 카탈로그, 병합 GUI, 증분 동기화 / Foundation, catalog, merge GUI and incremental sync | Completed |
 | 5 | 재생시간 분할 및 장애 복구 / Duration planning and crash recovery | Completed |
 | 5-1 | 파일명 접두사 지원 및 소스 격리 / Filename prefixes and source isolation | Completed |
-| 5-2 | 다중 파일명 패턴 및 타임스탬프 형식 / Multi-format filename parser | Next |
+| 5-2 | 다중 파일명 패턴 및 타임스탬프 형식 / Multi-format filename parser | Completed |
 | 5-3 | 사용자 정의 파일명 규칙 및 미리보기 / Custom filename templates and preview | Proposed |
 | 6 | SQLite 작업 관리 및 원클릭 복구 / Job management and one-click recovery | In progress — paused for parser expansion |
 | 7 | 수동 대기열 및 백그라운드 병합 / Manual queue and background merging | Planned |
@@ -214,7 +260,7 @@ $env:MKVMERGE_EXE = 'C:\Program Files\MKVToolNix\mkvmerge.exe'
 .\.venv\Scripts\python.exe -W error::ResourceWarning -m unittest discover -s tests -v
 ```
 
-Windows 심볼릭 링크 생성 권한이 없으면 해당 보안 테스트가 건너뛰어질 수 있습니다. 최신 회귀 테스트는 211개 중 210개 통과, 1개 건너뜀입니다. 제5부 당시 관리자 권한 환경에서는 184개 모두 통과했습니다. / The symlink test may be skipped without appropriate Windows permissions. The latest suite recorded 210 passes and 1 skip out of 211 tests; all 184 historical Part 5 tests passed in an elevated session.
+Windows 심볼릭 링크 생성 권한이 없으면 해당 보안 테스트가 건너뛰어질 수 있습니다. 최신 회귀 테스트는 216개 중 215개 통과, 1개 건너뜀입니다. 제5부 당시 관리자 권한 환경에서는 184개 모두 통과했습니다. / The symlink test may be skipped without appropriate Windows permissions. The latest suite recorded 215 passes and 1 skip out of 216 tests; all 184 historical Part 5 tests passed in an elevated session.
 
 ## 8. Technology Stack | 기술 스택
 
@@ -236,7 +282,7 @@ Windows 심볼릭 링크 생성 권한이 없으면 해당 보안 테스트가 �
 | 원본 CCTV는 읽기 전용으로 취급 | Treat source recordings as read-only |
 | 병합 결과는 별도 출력 폴더에 저장 | Write outputs to a separate directory |
 | 원본 자동 이동 및 삭제 금지 | Do not automatically move or delete originals |
-| 서로 다른 소스 폴더 및 충돌 접두사 병합 거부 | Reject mixed source folders and conflicting prefixes |
+| 서로 다른 소스 폴더 및 충돌하는 접두사·접미사 병합 거부 | Reject mixed source folders and conflicting prefixes/suffixes |
 | 기존 출력 덮어쓰기 방지 | Prevent unintended output overwrites |
 | 완료 그룹의 무결성 확인 | Verify completed outputs before reuse |
 | 미완료 영상 및 잠금은 승인 후 별도 보존 | Preserve incomplete artifacts after approved recovery |
