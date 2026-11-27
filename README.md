@@ -5,8 +5,8 @@
   <img alt="PySide6" src="https://img.shields.io/badge/GUI-PySide6-41CD52?logo=qt&logoColor=white">
   <img alt="Windows 11" src="https://img.shields.io/badge/Platform-Windows%2011-0078D4">
   <img alt="Alpha" src="https://img.shields.io/badge/Version-0.1.0a0-orange">
-  <img alt="184 tests passed" src="https://img.shields.io/badge/Tests-184%2F184%20passed-brightgreen">
-  <img alt="Part 5 completed" src="https://img.shields.io/badge/Development-Part%205%20completed-blue">
+  <img alt="210 passed, 1 skipped" src="https://img.shields.io/badge/Tests-210%20passed%20%7C%201%20skipped-brightgreen">
+  <img alt="Part 5-1 validated" src="https://img.shields.io/badge/Development-Part%205--1%20validated-blue">
 </p>
 <p align="center">One Core, Two Editions — Lite &amp; Pro</p>
 
@@ -34,6 +34,9 @@ The screenshot shows a file-count-based merge plan in the development build, not
 | 한국어 | English | 상태 / Status |
 |---|---|---|
 | MKV 검색 및 날짜·시간 분류 | MKV discovery and chronological cataloging | Implemented |
+| 유연한 파일명 접두사 및 기존 규칙 호환 | Flexible filename prefixes and backward compatibility | Implemented — Part 5-1 |
+| 단일 소스 폴더 및 접두사 충돌 검사 | Single-source folder and prefix conflict checks | Implemented — Part 5-1 |
+| 다중 타임스탬프 형식 | Multiple timestamp formats | Planned — Part 5-2 |
 | SQLite 캐시 및 증분 동기화 | SQLite caching and incremental synchronization | Implemented |
 | SMB 원본 조회 | SMB source access | Implemented |
 | 파일 개수 / 실제 재생시간 균등 분할 | File-count / duration-based partitioning | Implemented |
@@ -44,8 +47,36 @@ The screenshot shows a file-count-based merge plan in the development build, not
 | MKV 식별 및 SHA-256 검사 | MKV identification and SHA-256 verification | Implemented |
 | 선택적 FFmpeg 전체 디코딩 | Optional full FFmpeg decoding | Implemented |
 | 읽기 전용 진단 및 승인 기반 복구 | Read-only diagnostics and approved recovery | Implemented |
-| SQLite 병합 작업 이력 및 원클릭 복구 | SQLite job history and one-click recovery | Planned — Part 6 |
+| SQLite 병합 작업 이력 및 원클릭 복구 | SQLite job history and one-click recovery | In progress — schema and state management implemented; integration pending |
 | 수동 작업 대기열 | Manual job queue | Planned — Part 7 |
+
+### 3.1. Supported Recording Filenames | 지원 파일명 규칙
+
+현재는 Agent DVR 형식의 타임스탬프를 사용하며, 선택적 접두사를 지원합니다. / The current parser supports Agent DVR-style timestamps with an optional prefix.
+
+```text
+YYYY-MM-DD_HH-mm-ss_SSS.mkv
+PREFIX_YYYY-MM-DD_HH-mm-ss_SSS.mkv
+```
+
+| 예시 / Example | 상태 / Status |
+|---|---|
+| `2026-11-25_19-43-05_859.mkv` | Supported |
+| `4_2026-11-25_19-43-05_859.mkv` | Supported |
+| `[CH1]C545D-Wide_2026-11-25_19-43-05_859.mkv` | Supported |
+| `현관 카메라_2026-11-25_19-43-05_859.mkv` | Supported |
+| `20261125-194305.mkv` | Planned |
+| `2026_11_25_19_43_05_859.mkv` | Planned |
+| `2026-11-25_19-43-05.mkv` | Not yet supported |
+| `20261125-194305_CH1.mkv` | Not yet supported |
+
+숫자, 영문, 한글, 공백, 대괄호 및 하이픈 등이 포함된 접두사를 허용하며 잘못된 날짜·시간은 거부합니다. `.mkv` 확장자는 대소문자를 구분하지 않습니다. 현재 날짜·시간 구조와 3자리 밀리초는 고정되어 있습니다.
+
+Prefixes may contain numbers, letters, Korean characters, spaces, brackets and hyphens. Invalid dates and times are rejected. The `.mkv` extension is case-insensitive. The timestamp layout and three-digit milliseconds are currently mandatory.
+
+병합 시 한 폴더가 하나의 카메라 소스라는 전제를 사용합니다. 서로 다른 폴더 또는 충돌하는 명시적 카메라 접두사는 거부합니다. 숫자 접두사와 접두사 없는 파일은 동일 폴더에서 공존할 수 있지만, 실제 카메라의 물리적 동일성을 증명하지는 않습니다. 사용자가 소스별로 폴더를 분리해야 합니다.
+
+Merging assumes one camera source per folder. Mixed folders or conflicting explicit camera labels are rejected. Numeric IDs and unprefixed filenames may coexist in a folder but do not prove physical camera identity. Users must keep sources separated.
 
 ## 4. Editions & Architecture | 제품 구성 및 공통 엔진
 
@@ -83,7 +114,34 @@ Tailscale을 통한 원격 저장소 접근도 Pro의 검토 대상입니다. / 
 
 ## 5. Development Status | 개발 현황
 
-**Alpha 0.1.0a0 · Part 5 completed · 2026-11-25**
+**Alpha 0.1.0a0 · Part 5-1 validated · 2026-11-27**
+
+### Latest validation | 최신 검증 (Part 5-1)
+
+| 검증 항목 / Validation | 결과 / Result |
+|---|---|
+| C500 파일명 인식 개선 / C500 filename recognition | 7,378/7,857 (93.90%) → 7,857/7,857 (100%) |
+| C500 추가 인식 / Newly recognized C500 files | 479 |
+| 신규 4채널 파일명 / Four-channel filenames | 63/63 |
+| 전체 파일명 검증 / Total filename checks | 7,920 files |
+| C500 조사 데이터 / C500 inventory | 427.39 GiB, 59 recording days |
+| 카탈로그 및 병합 계획 / Catalog and merge planning | 52/52 PASS |
+| 병합 실행 안전성 / Merge preparation safety | 27/27 PASS |
+| 실제 MKV 병합 및 메타데이터 / Real merges and metadata checks | 14/14 PASS |
+| 검사 대상 입력 해시 / Tested input SHA-256 | Unchanged |
+| 전체 회귀 테스트 / Regression suite | 211 total: 210 passed, 1 skipped, 0 failed |
+| 테스트 실행 시간 / Test runtime | 3.581 s |
+| 제5-1부 코드 커밋 / Part 5-1 code commit | `332cb6e` |
+
+실제 C500 8개 파일의 2분할 검사에서 A 방식의 Part 간 재생시간 편차는 1,241.288초, B 방식은 559.482초로 약 54.93% 감소했습니다. 이는 해당 샘플의 계획 기준 실측 재생시간을 이용한 결과이며 모든 데이터에서 같은 개선율을 보장하지 않습니다.
+
+In the real eight-file C500 two-part test, the planned duration spread fell from 1,241.288 seconds (Plan A) to 559.482 seconds (Plan B), approximately 54.93%. This is sample-specific and not a universal performance guarantee.
+
+14개 병합 결과는 메타데이터 검사 기준입니다. 결과물 전체 디코딩 및 SEI/DTS 진단의 상세 원인 분석은 보류했으며 기존 무결성 정책은 변경하지 않았습니다. 전체 7,920개 파일의 실제 병합을 수행한 것은 아닙니다.
+
+The 14 successful merges were checked at metadata level. Full decoding of these outputs and detailed SEI/DTS investigation remain deferred; the existing integrity policy is unchanged. The 7,920-file inventory was not merged in full.
+
+### Historical validation | 이전 검증 (Part 5 · 2026-11-25)
 
 | 검증 항목 / Validation | 결과 / Result |
 |---|---|
@@ -109,7 +167,10 @@ These are measured results from the Windows test environment. Full-dataset mergi
 |---|---|---|
 | 1–4 | 초기 개발, 카탈로그, 병합 GUI, 증분 동기화 / Foundation, catalog, merge GUI and incremental sync | Completed |
 | 5 | 재생시간 분할 및 장애 복구 / Duration planning and crash recovery | Completed |
-| 6 | SQLite 작업 관리 및 원클릭 복구 / Job management and one-click recovery | Next |
+| 5-1 | 파일명 접두사 지원 및 소스 격리 / Filename prefixes and source isolation | Completed |
+| 5-2 | 다중 파일명 패턴 및 타임스탬프 형식 / Multi-format filename parser | Next |
+| 5-3 | 사용자 정의 파일명 규칙 및 미리보기 / Custom filename templates and preview | Proposed |
+| 6 | SQLite 작업 관리 및 원클릭 복구 / Job management and one-click recovery | In progress — paused for parser expansion |
 | 7 | 수동 대기열 및 백그라운드 병합 / Manual queue and background merging | Planned |
 | 8 | 대규모 운영 검증 및 최적화 / Large-scale testing and optimization | Planned |
 | 9 | GUI 개선 및 Windows 패키징 / UX and Windows packaging | Planned |
@@ -153,7 +214,7 @@ $env:MKVMERGE_EXE = 'C:\Program Files\MKVToolNix\mkvmerge.exe'
 .\.venv\Scripts\python.exe -W error::ResourceWarning -m unittest discover -s tests -v
 ```
 
-Windows 심볼릭 링크 생성 권한이 없으면 해당 보안 테스트가 건너뛰어질 수 있습니다. 최종 184개 테스트는 관리자 권한 환경에서 통과했습니다. / The symlink test may be skipped without appropriate Windows permissions. All 184 tests passed in an elevated test session.
+Windows 심볼릭 링크 생성 권한이 없으면 해당 보안 테스트가 건너뛰어질 수 있습니다. 최신 회귀 테스트는 211개 중 210개 통과, 1개 건너뜀입니다. 제5부 당시 관리자 권한 환경에서는 184개 모두 통과했습니다. / The symlink test may be skipped without appropriate Windows permissions. The latest suite recorded 210 passes and 1 skip out of 211 tests; all 184 historical Part 5 tests passed in an elevated session.
 
 ## 8. Technology Stack | 기술 스택
 
@@ -175,6 +236,7 @@ Windows 심볼릭 링크 생성 권한이 없으면 해당 보안 테스트가 �
 | 원본 CCTV는 읽기 전용으로 취급 | Treat source recordings as read-only |
 | 병합 결과는 별도 출력 폴더에 저장 | Write outputs to a separate directory |
 | 원본 자동 이동 및 삭제 금지 | Do not automatically move or delete originals |
+| 서로 다른 소스 폴더 및 충돌 접두사 병합 거부 | Reject mixed source folders and conflicting prefixes |
 | 기존 출력 덮어쓰기 방지 | Prevent unintended output overwrites |
 | 완료 그룹의 무결성 확인 | Verify completed outputs before reuse |
 | 미완료 영상 및 잠금은 승인 후 별도 보존 | Preserve incomplete artifacts after approved recovery |
@@ -184,7 +246,7 @@ Windows 심볼릭 링크 생성 권한이 없으면 해당 보안 테스트가 �
 
 개발 과정과 검증 결과는 GitHub 및 네이버 블로그 개발일지에 기록합니다. / Development progress and validation results are documented on GitHub and in the Korean development blog series.
 
-[GitHub Repository](https://github.com/GinGer-JSK/CCTV-Archive-Manager) · [Part 5 code commit](https://github.com/GinGer-JSK/CCTV-Archive-Manager/commit/0a17248404f908ff18b00846692cf1e466eaf287)
+[GitHub Repository](https://github.com/GinGer-JSK/CCTV-Archive-Manager) · [Part 5 code commit](https://github.com/GinGer-JSK/CCTV-Archive-Manager/commit/0a17248404f908ff18b00846692cf1e466eaf287) · [Part 5-1 code commit](https://github.com/GinGer-JSK/CCTV-Archive-Manager/commit/332cb6e) · [CHANGELOG](CHANGELOG.md)
 
 ## 11. License | 라이선스
 
